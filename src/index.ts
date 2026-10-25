@@ -295,10 +295,26 @@ async function httpErrorMessage(res: Response, name: string): Promise<string> {
   // internal-host-class.ts; no-op for every third-party upstream, which is why
   // this touches 481 packs' error text and changes none of it.
   return markInternalOrigin(
-    `${name}: ${res.status}${detailSuffix(await readDetail(res))}`,
+    `${name}: ${res.status}${detailSuffix(await readDetail(res))}${responseHints(res)}`,
     res.url,
     res.status,
   );
+}
+
+/**
+ * Facts about a FAILED response that live in its headers, not its body, appended
+ * so the gateway's classifier (which only ever sees this string) can tell a limit
+ * from a wall from a refusal (fleet #3477). Both are standard, both are absent on
+ * almost every response, and neither is invented: `Retry-After` is the server
+ * saying "come back later" (the one thing that makes a 403 a throttle), and
+ * Cloudflare marks a bot challenge with `cf-mitigated: challenge`.
+ */
+function responseHints(res: Response): string {
+  const hints: string[] = [];
+  const retryAfter = res.headers.get('retry-after');
+  if (retryAfter) hints.push(`retry-after: ${retryAfter.slice(0, 40)}`);
+  if ((res.headers.get('cf-mitigated') ?? '').toLowerCase() === 'challenge') hints.push('Cloudflare bot challenge (cf-mitigated: challenge)');
+  return hints.length ? ` (${hints.join('; ')})` : '';
 }
 
 /**
@@ -959,6 +975,10 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
     if (params) for (const [k, v] of Object.entries(params)) if (v != null) p.set(k, String(v));
     const url = `${BASE}${path}${[...p].length ? `?${p}` : ''}`;
     const res = await pwFetch(url, { headers: { Accept: 'application/json', 'User-Agent': UA } });
+    // A 404 is a caller asking for an id that does not exist (products stop at
+    // 194), not a defect. Thrown bare it booked as `error` and put this pack on
+    // the Problem Tools list for one caller walking ids (2026-10-22).
+    if (res.status === 404) throw new Error(`not_found: DummyJSON has no record at ${path}. Ids are small sequential integers; list the collection first to see the valid range.`);
     if (!res.ok) throw await httpError(res, 'DummyJSON');
     return res.json();
   };
